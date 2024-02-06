@@ -148,23 +148,27 @@ fn main() {
             let light = light.var();
 
             if (walls.read(pos - x) & WALL_REFLECT) != 0 {
-                *light.z += light.x;
+                // *light.z += light.x;
+                *light.z = 0.1 * light.x;
                 *light.x = 0.0;
             }
             if (walls.read(pos - y) & WALL_REFLECT) != 0 {
-                *light.w += light.y;
+                // *light.w += light.y;
+                *light.w = 0.1 * light.y;
                 *light.y = 0.0;
             }
             if (walls.read(pos + x) & WALL_REFLECT) != 0 {
-                *light.x += light.z;
+                // *light.x += light.z;
+                *light.x = 0.1 * light.z;
                 *light.z = 0.0;
             }
             if (walls.read(pos + y) & WALL_REFLECT) != 0 {
-                *light.y += light.w;
+                // *light.y += light.w;
+                *light.y = 0.1 * light.w;
                 *light.w = 0.0;
             }
 
-            next_lights.write(pos, light / light.reduce_sum() * power);
+            next_lights.write(pos, light);
         }),
     );
 
