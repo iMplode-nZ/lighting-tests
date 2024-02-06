@@ -123,25 +123,21 @@ fn main() {
                 let light = Vec4::<f32>::var_zeroed();
 
                 let l = lights.read(pos - x).var();
-                *l.x = 0.0;
                 let p = powers.read(pos - x) * l.z;
                 *light += l * p;
                 *power += p;
 
                 let l = lights.read(pos - y).var();
-                *l.y = 0.0;
                 let p = powers.read(pos - y) * l.w;
                 *light += l * p;
                 *power += p;
 
                 let l = lights.read(pos + x).var();
-                *l.z = 0.0;
                 let p = powers.read(pos + x) * l.x;
                 *light += l * p;
                 *power += p;
 
                 let l = lights.read(pos + y).var();
-                *l.w = 0.0;
                 let p = powers.read(pos + y) * l.y;
                 *light += l * p;
                 *power += p;
