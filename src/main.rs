@@ -12,7 +12,6 @@ use luisa_compute as luisa;
 const GRID_SIZE: u32 = 128;
 const SCALING: u32 = 8;
 const SCALE_POWER: u32 = 3;
-const MAX_LIGHT: f32 = 16.0;
 const EPSILON: f32 = 0.01;
 
 const WALL_ABSORB: u32 = 0b01;
@@ -64,7 +63,7 @@ fn main() {
             let display_pos = dispatch_id().xy();
             let pos = display_pos >> SCALE_POWER;
             let power = light.read(pos).reduce_sum();
-            let color = power / MAX_LIGHT
+            let color = power
                 * if (emission.read(pos) == 0.0).all() {
                     Vec3::splat_expr(1.0)
                 } else {
@@ -144,29 +143,19 @@ fn main() {
                 return;
             }
 
-            let light = light / light.reduce_sum() * power;
-            let light = light.var();
-
             if (walls.read(pos - x) & WALL_REFLECT) != 0 {
-                // *light.z += light.x;
-                *light.z = 0.1 * light.x;
-                *light.x = 0.0;
+                *light = Vec4::new(0.0, 1.0, 1.0, 1.0);
             }
             if (walls.read(pos - y) & WALL_REFLECT) != 0 {
-                // *light.w += light.y;
-                *light.w = 0.1 * light.y;
-                *light.y = 0.0;
+                *light = Vec4::new(1.0, 0.0, 1.0, 1.0);
             }
             if (walls.read(pos + x) & WALL_REFLECT) != 0 {
-                // *light.x += light.z;
-                *light.x = 0.1 * light.z;
-                *light.z = 0.0;
+                *light = Vec4::new(1.0, 1.0, 0.0, 1.0);
             }
             if (walls.read(pos + y) & WALL_REFLECT) != 0 {
-                // *light.y += light.w;
-                *light.y = 0.1 * light.w;
-                *light.w = 0.0;
+                *light = Vec4::new(1.0, 1.0, 1.0, 0.0);
             }
+            let light = light / light.reduce_sum() * power;
 
             next_lights.write(pos, light);
         }),
@@ -185,7 +174,7 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::splat(MAX_LIGHT / 4.0));
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(0.7, 0.1, 0.1, 0.1));
         }
         if active_buttons.contains(&MouseButton::Right) {
             update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_REFLECT);
