@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::env::current_exe;
 
-use winit::event::{Event, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use luisa::lang::types::vector::*;
@@ -8,29 +10,14 @@ use luisa::prelude::*;
 use luisa_compute as luisa;
 
 const GRID_SIZE: u32 = 128;
-const GRID_POWER: u32 = 7;
 const SCALING: u32 = 8;
 const SCALE_POWER: u32 = 3;
-const MAX_POWER: f32 = 16.0;
+const MAX_LIGHT: f32 = 16.0;
+const EPSILON: f32 = 0.01;
 
-#[tracked]
-fn hash(x: Expr<u32>) -> Expr<u32> {
-    let x = x.var();
-    *x ^= x >> 17;
-    *x *= 0xed5ad4bb;
-    *x ^= x >> 11;
-    *x *= 0xac4c1b51;
-    *x ^= x >> 15;
-    *x *= 0x31848bab;
-    *x ^= x >> 14;
-    **x
-}
-
-#[tracked]
-fn rand_at(pos: Expr<Vec2<u32>>, t: Expr<u32>) -> Expr<u32> {
-    let input = pos.x + pos.y << GRID_POWER + t << (GRID_POWER * 2);
-    hash(input)
-}
+const WALL_ABSORB: u32 = 0b01;
+const WALL_REFLECT: u32 = 0b10;
+const WALL_DIFFUSE: u32 = 0b100;
 
 fn main() {
     luisa::init_logger();
@@ -66,142 +53,190 @@ fn main() {
     // Directions: (-1, 0) - x, (0, -1) - y, (1, 0) - z, (0, 1) - w
     let lights_a = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
     let lights_b = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
-    let power_a = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
-    let power_b = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
 
     let emission = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
-    let emission_power = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
 
-    let draw_kernel = Kernel::<fn(Tex2d<f32>)>::new_async(
+    let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
+
+    let draw_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
         &device,
-        &track!(|power| {
+        &track!(|light| {
             let display_pos = dispatch_id().xy();
             let pos = display_pos >> SCALE_POWER;
-            let power = power.read(pos);
-            let color = power / MAX_POWER
-                * if emission_power.read(pos) == 0.0 {
+            let power = light.read(pos).reduce_sum();
+            let color = power / MAX_LIGHT
+                * if (emission.read(pos) == 0.0).all() {
                     Vec3::splat_expr(1.0)
                 } else {
                     Vec3::new(1.0, 0.0, 0.0).expr()
                 };
+            let color = color.var();
+            if walls.read(pos) != 0 {
+                *color = Vec3::new(0.0, 1.0, 0.0).expr();
+            }
             display.write(display_pos, color.extend(1.0));
         }),
     );
 
-    let emit_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<f32>)>::new_async(
+    let emit_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
         &device,
-        &track!(|lights, powers| {
+        &track!(|lights| {
             let pos = dispatch_id().xy();
-            let power = emission_power.read(pos);
-            if power != 0.0 {
-                lights.write(pos, emission.read(pos));
-                powers.write(pos, power);
+            let emission = emission.read(pos);
+            if (emission != 0.0).any() {
+                lights.write(pos, emission);
             }
         }),
     );
 
-    let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>, f32)>::new_async(
+    let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>)>::new_async(
         &device,
-        &track!(|pos, light, power| {
-            if light.reduce_sum() > 0.01 {
-                let light = light / light.reduce_sum();
-                emission.write(pos, light);
-                emission_power.write(pos, power);
-            }
+        &track!(|pos, light| {
+            emission.write(pos, light);
         }),
     );
 
-    let update_kernel =
-        Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<f32>, Tex2d<Vec4<f32>>, Tex2d<f32>)>::new_async(
-            &device,
-            &track!(|lights, powers, next_lights, next_powers| {
-                let x = Vec2::new(1_u32, 0);
-                let y = Vec2::new(0, 1_u32);
-                let pos = dispatch_id().xy() + 1;
+    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new_async(
+        &device,
+        &track!(|pos, wall| {
+            walls.write(pos, wall);
+        }),
+    );
 
-                let power = 0.0.var();
-                let light = Vec4::<f32>::var_zeroed();
+    let update_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<Vec4<f32>>)>::new_async(
+        &device,
+        &track!(|lights, next_lights| {
+            let x = Vec2::new(1_u32, 0);
+            let y = Vec2::new(0, 1_u32);
+            let pos = dispatch_id().xy() + 1;
 
-                let l = lights.read(pos - x).var();
-                let p = powers.read(pos - x) * l.z;
-                *light += l * p;
+            let power = 0.0.var();
+            let light = Vec4::<f32>::var_zeroed();
+
+            let l = lights.read(pos - x);
+            if l.reduce_sum() > EPSILON {
+                let p = l.z;
+                *light += l * p / l.reduce_sum();
                 *power += p;
+            }
 
-                let l = lights.read(pos - y).var();
-                let p = powers.read(pos - y) * l.w;
-                *light += l * p;
+            let l = lights.read(pos - y);
+            if l.reduce_sum() > EPSILON {
+                let p = l.w;
+                *light += l * p / l.reduce_sum();
                 *power += p;
+            }
 
-                let l = lights.read(pos + x).var();
-                let p = powers.read(pos + x) * l.x;
-                *light += l * p;
+            let l = lights.read(pos + x);
+            if l.reduce_sum() > EPSILON {
+                let p = l.x;
+                *light += l * p / l.reduce_sum();
                 *power += p;
+            }
 
-                let l = lights.read(pos + y).var();
-                let p = powers.read(pos + y) * l.y;
-                *light += l * p;
+            let l = lights.read(pos + y);
+            if l.reduce_sum() > EPSILON {
+                let p = l.y;
+                *light += l * p / l.reduce_sum();
                 *power += p;
+            }
+            if light.reduce_sum() <= EPSILON {
+                return;
+            }
 
-                if light.reduce_sum() > 0.01 {
-                    next_lights.write(pos, light / light.reduce_sum());
-                }
-                next_powers.write(pos, power);
-            }),
-        );
+            let light = light / light.reduce_sum() * power;
+            let light = light.var();
+
+            if (walls.read(pos - x) & WALL_REFLECT) != 0 {
+                *light.z += light.x;
+                *light.x = 0.0;
+            }
+            if (walls.read(pos - y) & WALL_REFLECT) != 0 {
+                *light.w += light.y;
+                *light.y = 0.0;
+            }
+            if (walls.read(pos + x) & WALL_REFLECT) != 0 {
+                *light.x += light.z;
+                *light.z = 0.0;
+            }
+            if (walls.read(pos + y) & WALL_REFLECT) != 0 {
+                *light.y += light.w;
+                *light.w = 0.0;
+            }
+
+            next_lights.write(pos, light / light.reduce_sum() * power);
+        }),
+    );
 
     let mut parity = false;
 
-    update_emission_kernel.dispatch(
-        [1, 1, 1],
-        &Vec2::splat(64),
-        &Vec4::new(1.0, 1.0, 1.0, 1.0),
-        &MAX_POWER,
-    );
+    let mut cursor_pos = PhysicalPosition::new(0.0, 0.0);
+
+    let mut active_buttons = HashSet::new();
+
+    let update_cursor = |active_buttons: &HashSet<MouseButton>,
+                         cursor_pos: PhysicalPosition<f64>| {
+        let pos = Vec2::new(
+            (cursor_pos.x as u32) >> SCALE_POWER,
+            (cursor_pos.y as u32) >> SCALE_POWER,
+        );
+        if active_buttons.contains(&MouseButton::Left) {
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::splat(MAX_LIGHT / 4.0));
+        }
+        if active_buttons.contains(&MouseButton::Right) {
+            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_REFLECT);
+        }
+    };
+    let update_cursor = &update_cursor;
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
         .run(move |event, elwt| match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => {
-                elwt.exit();
-            }
-            Event::AboutToWait => {
-                window.request_redraw();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                window_id,
-            } if window_id == window.id() => {
-                let lights = if parity { &lights_a } else { &lights_b };
-                let powers = if parity { &power_a } else { &power_b };
-                let next_lights = if parity { &lights_b } else { &lights_a };
-                let next_powers = if parity { &power_b } else { &power_a };
-                parity = !parity;
-                {
-                    let scope = device.default_stream().scope();
-                    scope.present(&swapchain, &display);
-                    let commands = vec![
-                        update_kernel.dispatch_async(
-                            [GRID_SIZE - 2, GRID_SIZE - 2, 1],
-                            lights,
-                            powers,
-                            next_lights,
-                            next_powers,
-                        ),
-                        emit_kernel.dispatch_async(
-                            [GRID_SIZE, GRID_SIZE, 1],
-                            next_lights,
-                            next_powers,
-                        ),
-                        draw_kernel.dispatch_async(
-                            [GRID_SIZE * SCALING, GRID_SIZE * SCALING, 1],
-                            next_powers,
-                        ),
-                    ];
-                    scope.submit(commands);
+            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+                WindowEvent::CloseRequested => {
+                    elwt.exit();
                 }
+                WindowEvent::RedrawRequested => {
+                    let lights = if parity { &lights_a } else { &lights_b };
+                    let next_lights = if parity { &lights_b } else { &lights_a };
+                    parity = !parity;
+                    {
+                        let scope = device.default_stream().scope();
+                        scope.present(&swapchain, &display);
+                        let commands = vec![
+                            update_kernel.dispatch_async(
+                                [GRID_SIZE - 2, GRID_SIZE - 2, 1],
+                                lights,
+                                next_lights,
+                            ),
+                            emit_kernel.dispatch_async([GRID_SIZE, GRID_SIZE, 1], next_lights),
+                            draw_kernel.dispatch_async(
+                                [GRID_SIZE * SCALING, GRID_SIZE * SCALING, 1],
+                                next_lights,
+                            ),
+                        ];
+                        scope.submit(commands);
+                    }
+                    window.request_redraw();
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    cursor_pos = position;
+                    update_cursor(&active_buttons, cursor_pos);
+                }
+                WindowEvent::MouseInput { button, state, .. } => {
+                    match state {
+                        ElementState::Pressed => {
+                            active_buttons.insert(button);
+                        }
+                        ElementState::Released => {
+                            active_buttons.remove(&button);
+                        }
+                    }
+                    update_cursor(&active_buttons, cursor_pos);
+                }
+                _ => (),
+            },
+            Event::AboutToWait => {
                 window.request_redraw();
             }
             _ => (),
