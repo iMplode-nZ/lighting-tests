@@ -103,8 +103,11 @@ fn main() {
     let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>, f32)>::new_async(
         &device,
         &track!(|pos, light, power| {
-            emission.write(pos, light);
-            emission_power.write(pos, power);
+            if light.reduce_sum() > 0.01 {
+                let light = light / light.reduce_sum();
+                emission.write(pos, light);
+                emission_power.write(pos, power);
+            }
         }),
     );
 
@@ -115,34 +118,49 @@ fn main() {
                 let x = Vec2::new(1_u32, 0);
                 let y = Vec2::new(0, 1_u32);
                 let pos = dispatch_id().xy() + 1;
-                // let light = Vec4::<u32>::var_zeroed();
-                // *light.x = lights.read(pos + x).x;
-                // *light.y = lights.read(pos + y).y;
-                // *light.z = lights.read(pos - x).z;
-                // *light.w = lights.read(pos - y).w;
 
-                // let light = luisa::max(light, 1_u32) - 1;
+                let power = 0.0.var();
+                let light = Vec4::<f32>::var_zeroed();
 
-                let h = 1.0;
-                let d = 1.414;
+                let l = lights.read(pos - x).var();
+                *l.x = 0.0;
+                let p = powers.read(pos - x) * l.z;
+                *light += l * p;
+                *power += p;
 
-                let power = 0.0;
-                let power = luisa::max(power, powers.read(pos + x) - h);
-                let power = luisa::max(power, powers.read(pos + y) - h);
-                let power = luisa::max(power, powers.read(pos - x) - h);
-                let power = luisa::max(power, powers.read(pos - y) - h);
-                let power = luisa::max(power, powers.read(pos + x + y) - d);
-                let power = luisa::max(power, powers.read(pos + x - y) - d);
-                let power = luisa::max(power, powers.read(pos - x + y) - d);
-                let power = luisa::max(power, powers.read(pos - x - y) - d);
+                let l = lights.read(pos - y).var();
+                *l.y = 0.0;
+                let p = powers.read(pos - y) * l.w;
+                *light += l * p;
+                *power += p;
 
+                let l = lights.read(pos + x).var();
+                *l.z = 0.0;
+                let p = powers.read(pos + x) * l.x;
+                *light += l * p;
+                *power += p;
+
+                let l = lights.read(pos + y).var();
+                *l.w = 0.0;
+                let p = powers.read(pos + y) * l.y;
+                *light += l * p;
+                *power += p;
+
+                if light.reduce_sum() > 0.01 {
+                    next_lights.write(pos, light / light.reduce_sum());
+                }
                 next_powers.write(pos, power);
             }),
         );
 
     let mut parity = false;
 
-    update_emission_kernel.dispatch([1, 1, 1], &Vec2::splat(64), &Vec4::splat(1.0), &MAX_POWER);
+    update_emission_kernel.dispatch(
+        [1, 1, 1],
+        &Vec2::splat(64),
+        &Vec4::new(1.0, 1.0, 1.0, 1.0),
+        &MAX_POWER,
+    );
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
