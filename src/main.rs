@@ -11,7 +11,7 @@ const GRID_SIZE: u32 = 128;
 const GRID_POWER: u32 = 7;
 const SCALING: u32 = 8;
 const SCALE_POWER: u32 = 3;
-const MAX_POWER: u32 = 16;
+const MAX_POWER: f32 = 16.0;
 
 #[tracked]
 fn hash(x: Expr<u32>) -> Expr<u32> {
@@ -66,20 +66,20 @@ fn main() {
     // Directions: (-1, 0) - x, (0, -1) - y, (1, 0) - z, (0, 1) - w
     let lights_a = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
     let lights_b = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
-    let power_a = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
-    let power_b = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
+    let power_a = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
+    let power_b = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
 
     let emission = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
-    let emission_power = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
+    let emission_power = device.create_tex2d::<f32>(PixelStorage::Float1, GRID_SIZE, GRID_SIZE, 1);
 
-    let draw_kernel = Kernel::<fn(Tex2d<u32>)>::new_async(
+    let draw_kernel = Kernel::<fn(Tex2d<f32>)>::new_async(
         &device,
         &track!(|power| {
             let display_pos = dispatch_id().xy();
             let pos = display_pos >> SCALE_POWER;
             let power = power.read(pos);
-            let color = power.as_f32() / (MAX_POWER as f32)
-                * if emission_power.read(pos) == 0 {
+            let color = power / MAX_POWER
+                * if emission_power.read(pos) == 0.0 {
                     Vec3::splat_expr(1.0)
                 } else {
                     Vec3::new(1.0, 0.0, 0.0).expr()
@@ -88,19 +88,19 @@ fn main() {
         }),
     );
 
-    let emit_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<u32>)>::new_async(
+    let emit_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<f32>)>::new_async(
         &device,
         &track!(|lights, powers| {
             let pos = dispatch_id().xy();
             let power = emission_power.read(pos);
-            if power != 0 {
+            if power != 0.0 {
                 lights.write(pos, emission.read(pos));
                 powers.write(pos, power);
             }
         }),
     );
 
-    let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>, u32)>::new_async(
+    let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>, f32)>::new_async(
         &device,
         &track!(|pos, light, power| {
             emission.write(pos, light);
@@ -109,7 +109,7 @@ fn main() {
     );
 
     let update_kernel =
-        Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<u32>, Tex2d<Vec4<f32>>, Tex2d<u32>)>::new_async(
+        Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<f32>, Tex2d<Vec4<f32>>, Tex2d<f32>)>::new_async(
             &device,
             &track!(|lights, powers, next_lights, next_powers| {
                 let x = Vec2::new(1_u32, 0);
@@ -123,11 +123,18 @@ fn main() {
 
                 // let light = luisa::max(light, 1_u32) - 1;
 
-                let power = powers.read(pos + x);
-                let power = luisa::max(power, powers.read(pos + y));
-                let power = luisa::max(power, powers.read(pos - x));
-                let power = luisa::max(power, powers.read(pos - y));
-                let power = luisa::max(1_u32, power) - 1;
+                let h = 1.0;
+                let d = 1.414;
+
+                let power = 0.0;
+                let power = luisa::max(power, powers.read(pos + x) - h);
+                let power = luisa::max(power, powers.read(pos + y) - h);
+                let power = luisa::max(power, powers.read(pos - x) - h);
+                let power = luisa::max(power, powers.read(pos - y) - h);
+                let power = luisa::max(power, powers.read(pos + x + y) - d);
+                let power = luisa::max(power, powers.read(pos + x - y) - d);
+                let power = luisa::max(power, powers.read(pos - x + y) - d);
+                let power = luisa::max(power, powers.read(pos - x - y) - d);
 
                 next_powers.write(pos, power);
             }),
