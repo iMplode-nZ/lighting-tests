@@ -87,7 +87,7 @@ fn main() {
         }),
     );
 
-    let center_fraction = 3.0_f32.atan2(1.0) / (PI / 4.0);
+    let center_fraction = 1.0_f32.atan2(3.0) / (PI / 4.0);
 
     let update_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<Vec4<f32>>)>::new_async(
         &device,
