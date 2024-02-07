@@ -171,7 +171,7 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, -1.0, 0.0, -1.0));
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, 1.0, 1.0, 1.0));
         }
         if active_buttons.contains(&MouseButton::Right) {
             update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
