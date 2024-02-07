@@ -56,6 +56,8 @@ fn main() {
 
     let emission = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
 
+    let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
+
     let draw_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
         &device,
         &track!(|light| {
@@ -64,6 +66,15 @@ fn main() {
             let power = light.read(pos).reduce_sum();
             let color = power * Vec3::splat(1.0).expr();
             let color = color.var();
+
+            let w = walls.read(pos);
+            if w == WALL_ABSORB {
+                *color = Vec3::new(1.0, 0.0, 0.0).expr();
+            } else if w == WALL_DIFFUSE {
+                *color = Vec3::new(0.0, 1.0, 0.0).expr();
+            } else if w == WALL_REFLECT {
+                *color = Vec3::new(0.0, 0.0, 1.0).expr();
+            }
 
             display.write(display_pos, color.extend(1.0));
         }),
@@ -84,6 +95,13 @@ fn main() {
         &device,
         &track!(|pos, light| {
             emission.write(pos, light);
+        }),
+    );
+
+    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new_async(
+        &device,
+        &track!(|pos, wall| {
+            walls.write(pos, wall);
         }),
     );
 
@@ -127,6 +145,15 @@ fn main() {
             apply(y, x);
             apply(rev(y), x);
 
+            *light *= 0.99;
+
+            let w = walls.read(pos);
+            if w == WALL_ABSORB {
+                *light = Vec4::expr_zeroed();
+            } else if w == WALL_DIFFUSE {
+                *light = Vec4::splat_expr(light.reduce_sum() / 4.0);
+            }
+
             next_lights.write(pos, light);
         }),
     );
@@ -144,7 +171,13 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, 1.0, 1.0, 1.0));
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, -1.0, 0.0, -1.0));
+        }
+        if active_buttons.contains(&MouseButton::Right) {
+            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
+        }
+        if active_buttons.contains(&MouseButton::Middle) {
+            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_DIFFUSE);
         }
     };
     let update_cursor = &update_cursor;
