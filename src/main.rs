@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env::current_exe;
+use std::f32::consts::PI;
 
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
@@ -55,8 +56,6 @@ fn main() {
 
     let emission = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
 
-    let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
-
     let draw_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
         &device,
         &track!(|light| {
@@ -65,14 +64,7 @@ fn main() {
             let power = light.read(pos).reduce_sum();
             let color = power * Vec3::splat(1.0).expr();
             let color = color.var();
-            let w = walls.read(pos);
-            if w == WALL_ABSORB {
-                *color = Vec3::new(1.0, 0.0, 0.0).expr();
-            } else if w == WALL_DIFFUSE {
-                *color = Vec3::new(0.0, 1.0, 0.0).expr();
-            } else if w == WALL_REFLECT {
-                *color = Vec3::new(0.0, 0.0, 1.0).expr();
-            }
+
             display.write(display_pos, color.extend(1.0));
         }),
     );
@@ -95,67 +87,45 @@ fn main() {
         }),
     );
 
-    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new_async(
-        &device,
-        &track!(|pos, wall| {
-            walls.write(pos, wall);
-        }),
-    );
+    let center_fraction = 3.0_f32.atan2(1.0) / (PI / 4.0);
 
     let update_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<Vec4<f32>>)>::new_async(
         &device,
         &track!(|lights, next_lights| {
-            let x = Vec2::new(1_u32, 0);
-            let y = Vec2::new(0, 1_u32);
+            let x = Vec2::new(1_i32, 0);
+            let y = Vec2::new(0, 1_i32);
             let pos = dispatch_id().xy() + 1;
+
+            fn mask(offset: Vec2<i32>) -> Vec4<f32> {
+                if offset.x == -1 && offset.y == 0 {
+                    Vec4::new(1.0, 0.0, 0.0, 0.0)
+                } else if offset.x == 1 && offset.y == 0 {
+                    Vec4::new(0.0, 0.0, 1.0, 0.0)
+                } else if offset.x == 0 && offset.y == -1 {
+                    Vec4::new(0.0, 1.0, 0.0, 0.0)
+                } else if offset.x == 0 && offset.y == 1 {
+                    Vec4::new(0.0, 0.0, 0.0, 1.0)
+                } else {
+                    panic!("Invalid offset");
+                }
+            }
+            fn rev(offset: Vec2<i32>) -> Vec2<i32> {
+                Vec2::new(-offset.x, -offset.y)
+            }
 
             let light = Vec4::<f32>::var_zeroed();
 
-            let l = lights.read(pos - x);
-            if l.reduce_sum() > EPSILON {
-                let p = l.z;
-                *light += l * p / l.reduce_sum();
-            }
-
-            let l = lights.read(pos - y);
-            if l.reduce_sum() > EPSILON {
-                let p = l.w;
-                *light += l * p / l.reduce_sum();
-            }
-
-            let l = lights.read(pos + x);
-            if l.reduce_sum() > EPSILON {
-                let p = l.x;
-                *light += l * p / l.reduce_sum();
-            }
-
-            let l = lights.read(pos + y);
-            if l.reduce_sum() > EPSILON {
-                let p = l.y;
-                *light += l * p / l.reduce_sum();
-            }
-
-            let w = walls.read(pos);
-
-            let p = light.reduce_sum() * 0.9;
-            if w == WALL_ABSORB {
-                *light = Vec4::expr_zeroed();
-            } else if w == WALL_DIFFUSE {
-                *light = Vec4::splat_expr(p / 4.0);
-            }
-
-            if walls.read(pos - x) == WALL_REFLECT {
-                *light = Vec4::expr(0.0, 0.0, p, 0.0);
-            }
-            if walls.read(pos - y) == WALL_REFLECT {
-                *light = Vec4::expr(0.0, 0.0, 0.0, p);
-            }
-            if walls.read(pos + x) == WALL_REFLECT {
-                *light = Vec4::expr(p, 0.0, 0.0, 0.0);
-            }
-            if walls.read(pos + y) == WALL_REFLECT {
-                *light = Vec4::expr(0.0, p, 0.0, 0.0);
-            }
+            let apply = |offset: Vec2<i32>, normal: Vec2<i32>| {
+                let l = lights.read((pos.cast_i32() + offset).cast_u32());
+                let l = (l * mask(rev(offset))).reduce_sum() / 2.0;
+                let c = 2.0 * center_fraction * l;
+                let n = (1.0 - center_fraction) * l;
+                *light += mask(rev(offset)) * c + mask(normal) * n + mask(rev(normal)) * n;
+            };
+            apply(x, y);
+            apply(rev(x), y);
+            apply(y, x);
+            apply(rev(y), x);
 
             next_lights.write(pos, light);
         }),
@@ -174,13 +144,7 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(0.1, 0.1, 0.4, 0.4));
-        }
-        if active_buttons.contains(&MouseButton::Right) {
-            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
-        }
-        if active_buttons.contains(&MouseButton::Middle) {
-            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_DIFFUSE);
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, 1.0, 1.0, 1.0));
         }
     };
     let update_cursor = &update_cursor;
