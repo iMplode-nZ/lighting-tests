@@ -63,15 +63,15 @@ fn main() {
             let display_pos = dispatch_id().xy();
             let pos = display_pos >> SCALE_POWER;
             let power = light.read(pos).reduce_sum();
-            let color = power
-                * if (emission.read(pos) == 0.0).all() {
-                    Vec3::splat_expr(1.0)
-                } else {
-                    Vec3::new(1.0, 0.0, 0.0).expr()
-                };
+            let color = power * Vec3::splat(1.0).expr();
             let color = color.var();
-            if walls.read(pos) != 0 {
+            let w = walls.read(pos);
+            if w == WALL_ABSORB {
+                *color = Vec3::new(1.0, 0.0, 0.0).expr();
+            } else if w == WALL_DIFFUSE {
                 *color = Vec3::new(0.0, 1.0, 0.0).expr();
+            } else if w == WALL_REFLECT {
+                *color = Vec3::new(0.0, 0.0, 1.0).expr();
             }
             display.write(display_pos, color.extend(1.0));
         }),
@@ -109,53 +109,53 @@ fn main() {
             let y = Vec2::new(0, 1_u32);
             let pos = dispatch_id().xy() + 1;
 
-            let power = 0.0.var();
             let light = Vec4::<f32>::var_zeroed();
 
             let l = lights.read(pos - x);
             if l.reduce_sum() > EPSILON {
                 let p = l.z;
                 *light += l * p / l.reduce_sum();
-                *power += p;
             }
 
             let l = lights.read(pos - y);
             if l.reduce_sum() > EPSILON {
                 let p = l.w;
                 *light += l * p / l.reduce_sum();
-                *power += p;
             }
 
             let l = lights.read(pos + x);
             if l.reduce_sum() > EPSILON {
                 let p = l.x;
                 *light += l * p / l.reduce_sum();
-                *power += p;
             }
 
             let l = lights.read(pos + y);
             if l.reduce_sum() > EPSILON {
                 let p = l.y;
                 *light += l * p / l.reduce_sum();
-                *power += p;
-            }
-            if light.reduce_sum() <= EPSILON {
-                return;
             }
 
-            if (walls.read(pos - x) & WALL_REFLECT) != 0 {
-                *light = Vec4::new(0.0, 1.0, 1.0, 1.0);
+            let w = walls.read(pos);
+
+            let p = light.reduce_sum() * 0.9;
+            if w == WALL_ABSORB {
+                *light = Vec4::expr_zeroed();
+            } else if w == WALL_DIFFUSE {
+                *light = Vec4::splat_expr(p / 4.0);
             }
-            if (walls.read(pos - y) & WALL_REFLECT) != 0 {
-                *light = Vec4::new(1.0, 0.0, 1.0, 1.0);
+
+            if walls.read(pos - x) == WALL_REFLECT {
+                *light = Vec4::expr(0.0, 0.0, p, 0.0);
             }
-            if (walls.read(pos + x) & WALL_REFLECT) != 0 {
-                *light = Vec4::new(1.0, 1.0, 0.0, 1.0);
+            if walls.read(pos - y) == WALL_REFLECT {
+                *light = Vec4::expr(0.0, 0.0, 0.0, p);
             }
-            if (walls.read(pos + y) & WALL_REFLECT) != 0 {
-                *light = Vec4::new(1.0, 1.0, 1.0, 0.0);
+            if walls.read(pos + x) == WALL_REFLECT {
+                *light = Vec4::expr(p, 0.0, 0.0, 0.0);
             }
-            let light = light / light.reduce_sum() * power;
+            if walls.read(pos + y) == WALL_REFLECT {
+                *light = Vec4::expr(0.0, p, 0.0, 0.0);
+            }
 
             next_lights.write(pos, light);
         }),
@@ -174,10 +174,13 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(0.7, 0.1, 0.1, 0.1));
+            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(0.1, 0.1, 0.4, 0.4));
         }
         if active_buttons.contains(&MouseButton::Right) {
-            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_REFLECT);
+            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
+        }
+        if active_buttons.contains(&MouseButton::Middle) {
+            update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_DIFFUSE);
         }
     };
     let update_cursor = &update_cursor;
