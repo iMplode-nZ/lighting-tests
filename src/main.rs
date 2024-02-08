@@ -102,7 +102,11 @@ fn main() {
             let pos = dispatch_id().xy();
             let v = velocity.read(pos);
             let h = height.read(pos);
-            height.write(pos, h + v * dt);
+            if walls.read(pos) == WALL_ABSORB {
+                height.write(pos, 0.0);
+            } else {
+                height.write(pos, h + v * dt);
+            }
         }),
     );
 
