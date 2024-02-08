@@ -115,8 +115,8 @@ fn main() {
             let h = height.read(pos);
             let ddx = (height.read(pos + x) - 2.0 * h + height.read(pos - x)) / (dx * dx);
             let ddy = (height.read(pos + y) - 2.0 * h + height.read(pos - y)) / (dx * dx);
-            let a = c * c + (ddx + ddy);
-            velocity.write(pos, velocity.read(pos) - a * dt);
+            let a = c * c * (ddx + ddy);
+            velocity.write(pos, velocity.read(pos) + a * dt);
         }),
     );
 
