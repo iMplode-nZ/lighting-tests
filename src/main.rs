@@ -10,10 +10,18 @@ use luisa::lang::types::vector::*;
 use luisa::prelude::*;
 use luisa_compute as luisa;
 
+use crate::light::compute_gathers;
+
+mod light;
+
 const GRID_SIZE: u32 = 128;
 const SCALING: u32 = 8;
 const SCALE_POWER: u32 = 3;
-const EPSILON: f32 = 0.01;
+
+const DIRECTIONS: u32 = 9;
+const TOTAL_DIRECTIONS: u32 = DIRECTIONS * 4;
+
+const STEP_DIFFUSE: f32 = 0.99;
 
 const WALL_ABSORB: u32 = 0b01;
 const WALL_REFLECT: u32 = 0b10;
@@ -50,22 +58,46 @@ fn main() {
         1,
     );
 
-    // Directions: (-1, 0) - x, (0, -1) - y, (1, 0) - z, (0, 1) - w
-    let lights_a = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
-    let lights_b = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
+    type Lights = Tex3d<Vec4<f32>>;
 
-    let emission = device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
+    let gathers = compute_gathers(DIRECTIONS);
+
+    let lights_a = device.create_tex3d::<Vec4<f32>>(
+        PixelStorage::Float4,
+        GRID_SIZE,
+        GRID_SIZE,
+        TOTAL_DIRECTIONS,
+        1,
+    );
+    let lights_b = device.create_tex3d::<Vec4<f32>>(
+        PixelStorage::Float4,
+        GRID_SIZE,
+        GRID_SIZE,
+        TOTAL_DIRECTIONS,
+        1,
+    );
+
+    let emission = device.create_tex3d::<Vec4<f32>>(
+        PixelStorage::Float4,
+        GRID_SIZE,
+        GRID_SIZE,
+        TOTAL_DIRECTIONS,
+        1,
+    );
 
     let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
 
-    let draw_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
+    let draw_kernel = Kernel::<fn(Lights)>::new_async(
         &device,
-        &track!(|light| {
+        &track!(|lights| {
             let display_pos = dispatch_id().xy();
             let pos = display_pos >> SCALE_POWER;
-            let power = light.read(pos).reduce_sum();
-            let color = power * Vec3::splat(1.0).expr();
-            let color = color.var();
+            let color = Vec3::<f32>::var_zeroed();
+            for i in 0..TOTAL_DIRECTIONS {
+                *color += lights.read(pos.extend(i)).xyz();
+            }
+
+            // TODO: Tonemap
 
             let w = walls.read(pos);
             if w == WALL_ABSORB {
@@ -80,10 +112,10 @@ fn main() {
         }),
     );
 
-    let emit_kernel = Kernel::<fn(Tex2d<Vec4<f32>>)>::new_async(
+    let emit_kernel = Kernel::<fn(Lights)>::new_async(
         &device,
         &track!(|lights| {
-            let pos = dispatch_id().xy();
+            let pos = dispatch_id();
             let emission = emission.read(pos);
             if (emission != 0.0).any() {
                 lights.write(pos, emission);
@@ -91,12 +123,16 @@ fn main() {
         }),
     );
 
-    let update_emission_kernel = Kernel::<fn(Vec2<u32>, Vec4<f32>)>::new_async(
-        &device,
-        &track!(|pos, light| {
-            emission.write(pos, light);
-        }),
-    );
+    let update_emission_kernel =
+        Kernel::<fn(Vec2<u32>, [Vec3<f32>; TOTAL_DIRECTIONS as usize])>::new_async(
+            &device,
+            &track!(|pos, light| {
+                emission.write(
+                    pos.extend(dispatch_id().z),
+                    light[dispatch_id().z].extend(0.0),
+                );
+            }),
+        );
 
     let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new_async(
         &device,
@@ -105,56 +141,59 @@ fn main() {
         }),
     );
 
-    let center_fraction = 1.0_f32.atan2(3.0) / (PI / 4.0);
-
-    let update_kernel = Kernel::<fn(Tex2d<Vec4<f32>>, Tex2d<Vec4<f32>>)>::new_async(
+    let update_kernel = Kernel::<fn(Lights, Lights)>::new_async(
         &device,
         &track!(|lights, next_lights| {
             let x = Vec2::new(1_i32, 0);
             let y = Vec2::new(0, 1_i32);
             let pos = dispatch_id().xy() + 1;
 
-            fn mask(offset: Vec2<i32>) -> Vec4<f32> {
-                if offset.x == -1 && offset.y == 0 {
-                    Vec4::new(1.0, 0.0, 0.0, 0.0)
-                } else if offset.x == 1 && offset.y == 0 {
-                    Vec4::new(0.0, 0.0, 1.0, 0.0)
-                } else if offset.x == 0 && offset.y == -1 {
-                    Vec4::new(0.0, 1.0, 0.0, 0.0)
-                } else if offset.x == 0 && offset.y == 1 {
-                    Vec4::new(0.0, 0.0, 0.0, 1.0)
-                } else {
-                    panic!("Invalid offset");
-                }
-            }
-            fn rev(offset: Vec2<i32>) -> Vec2<i32> {
-                Vec2::new(-offset.x, -offset.y)
-            }
+            let light = [Vec4::<f32>::splat(0.0); TOTAL_DIRECTIONS as usize].var();
 
-            let light = Vec4::<f32>::var_zeroed();
-
-            let apply = |offset: Vec2<i32>, normal: Vec2<i32>| {
-                let l = lights.read((pos.cast_i32() + offset).cast_u32());
-                let l = (l * mask(rev(offset))).reduce_sum() / 2.0;
-                let c = 2.0 * center_fraction * l;
-                let n = (1.0 - center_fraction) * l;
-                *light += mask(rev(offset)) * c + mask(normal) * n + mask(rev(normal)) * n;
+            let apply = |offset: Vec2<i32>, face: i8| {
+                escape!({
+                    for gather in &gathers {
+                        track!({
+                            let dir = gather.direction_to
+                                + ((face + gather.face_offset + 4) as u32 % 4) * DIRECTIONS;
+                            let transmission = gather.quantity
+                                * lights.read(
+                                    (pos.cast_i32() + offset)
+                                        .cast_u32()
+                                        .extend(face as u32 * DIRECTIONS + gather.direction_from),
+                                );
+                            light.write(dir, transmission + light[dir]);
+                        })
+                    }
+                })
             };
-            apply(x, y);
-            apply(rev(x), y);
-            apply(y, x);
-            apply(rev(y), x);
 
-            *light *= 0.99;
+            fn n(v: Vec2<i32>) -> Vec2<i32> {
+                Vec2::new(-v.x, -v.y)
+            }
+            apply(n(x), 0);
+            apply(y, 1);
+            apply(x, 2);
+            apply(n(y), 3);
+
+            for dir in 0..TOTAL_DIRECTIONS {
+                light.write(dir, light[dir] * STEP_DIFFUSE);
+            }
 
             let w = walls.read(pos);
             if w == WALL_ABSORB {
-                *light = Vec4::expr_zeroed();
-            } else if w == WALL_DIFFUSE {
-                *light = Vec4::splat_expr(light.reduce_sum() / 4.0);
+                *light = [Vec4::splat(0.0); TOTAL_DIRECTIONS as usize];
             }
+            // let w = walls.read(pos);
+            // if w == WALL_ABSORB {
+            //     light = Vec4::expr_zeroed();
+            // } else if w == WALL_DIFFUSE {
+            //     *light = Vec4::splat_expr(light.reduce_sum() / 4.0);
+            // }
 
-            next_lights.write(pos, light);
+            for i in 0..TOTAL_DIRECTIONS {
+                next_lights.write(pos.extend(i), light[i]);
+            }
         }),
     );
 
@@ -164,6 +203,18 @@ fn main() {
 
     let mut active_buttons = HashSet::new();
 
+    let light_color = Vec3::new(1.0, 0.7, 0.2);
+    let light_magnitude = 15.0;
+    let light = Vec3::new(
+        light_color.x * light_magnitude,
+        light_color.y * light_magnitude,
+        light_color.z * light_magnitude,
+    );
+
+    let mut total_light = [Vec3::splat(0.0); TOTAL_DIRECTIONS as usize];
+
+    total_light[4] = light;
+
     let update_cursor = |active_buttons: &HashSet<MouseButton>,
                          cursor_pos: PhysicalPosition<f64>| {
         let pos = Vec2::new(
@@ -171,7 +222,7 @@ fn main() {
             (cursor_pos.y as u32) >> SCALE_POWER,
         );
         if active_buttons.contains(&MouseButton::Left) {
-            update_emission_kernel.dispatch([1, 1, 1], &pos, &Vec4::new(1.0, 1.0, 1.0, 1.0));
+            update_emission_kernel.dispatch([1, 1, TOTAL_DIRECTIONS], &pos, &total_light);
         }
         if active_buttons.contains(&MouseButton::Right) {
             update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
@@ -202,7 +253,10 @@ fn main() {
                                 lights,
                                 next_lights,
                             ),
-                            emit_kernel.dispatch_async([GRID_SIZE, GRID_SIZE, 1], next_lights),
+                            emit_kernel.dispatch_async(
+                                [GRID_SIZE, GRID_SIZE, TOTAL_DIRECTIONS],
+                                next_lights,
+                            ),
                             draw_kernel.dispatch_async(
                                 [GRID_SIZE * SCALING, GRID_SIZE * SCALING, 1],
                                 next_lights,
