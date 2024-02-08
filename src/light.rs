@@ -76,7 +76,13 @@ pub fn compute_slope_gathers_n(directions: u32) -> Vec<Gather> {
         let angle = ((dir as f32 + 0.5) / directions as f32 - 0.5) * PI / 2.0;
         println!("Angle: {:?}", angle);
 
-        let blur = 0.0; // if dir == directions / 2 { 0.05 } else { 0.0 }; // 0.1 * (1.0 - (angle / (PI / 4.0)) * (angle / (PI / 4.0)));
+        let blur = if dir == 4 {
+            0.1
+        } else if dir == 3 || dir == 5 {
+            0.04
+        } else {
+            0.0
+        };
 
         let slope = angle.tan();
         let y = slope / (1.0 + slope.abs());
