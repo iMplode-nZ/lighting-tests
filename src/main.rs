@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::env::current_exe;
 use std::f32::consts::PI;
 
+use glam::IVec2;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -10,7 +11,7 @@ use luisa::lang::types::vector::*;
 use luisa::prelude::*;
 use luisa_compute as luisa;
 
-use crate::light::compute_gathers;
+use crate::light::{compute_gathers_2, compute_simple_gathers, compute_slope_gathers_n};
 
 mod light;
 
@@ -60,7 +61,7 @@ fn main() {
 
     type Lights = Tex3d<Vec4<f32>>;
 
-    let gathers = compute_gathers(DIRECTIONS);
+    let gathers = compute_slope_gathers_n(DIRECTIONS);
 
     let lights_a = device.create_tex3d::<Vec4<f32>>(
         PixelStorage::Float4,
@@ -87,7 +88,7 @@ fn main() {
 
     let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
 
-    let draw_kernel = Kernel::<fn(Lights)>::new_async(
+    let draw_kernel = Kernel::<fn(Lights)>::new(
         &device,
         &track!(|lights| {
             let display_pos = dispatch_id().xy();
@@ -112,7 +113,7 @@ fn main() {
         }),
     );
 
-    let emit_kernel = Kernel::<fn(Lights)>::new_async(
+    let emit_kernel = Kernel::<fn(Lights)>::new(
         &device,
         &track!(|lights| {
             let pos = dispatch_id();
@@ -124,7 +125,7 @@ fn main() {
     );
 
     let update_emission_kernel =
-        Kernel::<fn(Vec2<u32>, [Vec3<f32>; TOTAL_DIRECTIONS as usize])>::new_async(
+        Kernel::<fn(Vec2<u32>, [Vec3<f32>; TOTAL_DIRECTIONS as usize])>::new(
             &device,
             &track!(|pos, light| {
                 emission.write(
@@ -134,33 +135,46 @@ fn main() {
             }),
         );
 
-    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new_async(
+    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new(
         &device,
         &track!(|pos, wall| {
             walls.write(pos, wall);
         }),
     );
 
-    let update_kernel = Kernel::<fn(Lights, Lights)>::new_async(
+    let update_kernel = Kernel::<fn(Lights, Lights)>::new(
         &device,
         &track!(|lights, next_lights| {
-            let x = Vec2::new(1_i32, 0);
-            let y = Vec2::new(0, 1_i32);
             let pos = dispatch_id().xy() + 1;
 
             let light = [Vec4::<f32>::splat(0.0); TOTAL_DIRECTIONS as usize].var();
 
-            let apply = |offset: Vec2<i32>, face: i8| {
+            fn rotate(face: u32, dir: IVec2) -> IVec2 {
+                // TODO: Make sure these are right; it doesn't really matter though.
+                match face {
+                    // +x
+                    0 => dir,
+                    // -y
+                    1 => IVec2::new(-dir.y, dir.x),
+                    // -x
+                    2 => -dir,
+                    // y
+                    3 => IVec2::new(dir.y, -dir.x),
+                    _ => panic!("Invalid"),
+                }
+            }
+
+            let apply = |face: u32| {
                 escape!({
                     for gather in &gathers {
                         track!({
-                            let dir = gather.direction_to
-                                + ((face + gather.face_offset + 4) as u32 % 4) * DIRECTIONS;
+                            let dir = gather.direction + face * DIRECTIONS;
                             let transmission = gather.quantity
                                 * lights.read(
-                                    (pos.cast_i32() + offset)
-                                        .cast_u32()
-                                        .extend(face as u32 * DIRECTIONS + gather.direction_from),
+                                    (pos.cast_i32()
+                                        + Vec2::<i32>::from(rotate(face, gather.offset)))
+                                    .cast_u32()
+                                    .extend(dir),
                                 );
                             light.write(dir, transmission + light[dir]);
                         })
@@ -168,13 +182,10 @@ fn main() {
                 })
             };
 
-            fn n(v: Vec2<i32>) -> Vec2<i32> {
-                Vec2::new(-v.x, -v.y)
-            }
-            apply(n(x), 0);
-            apply(y, 1);
-            apply(x, 2);
-            apply(n(y), 3);
+            apply(0);
+            apply(1);
+            apply(2);
+            apply(3);
 
             for dir in 0..TOTAL_DIRECTIONS {
                 light.write(dir, light[dir] * STEP_DIFFUSE);
@@ -184,12 +195,17 @@ fn main() {
             if w == WALL_ABSORB {
                 *light = [Vec4::splat(0.0); TOTAL_DIRECTIONS as usize];
             }
-            // let w = walls.read(pos);
-            // if w == WALL_ABSORB {
-            //     light = Vec4::expr_zeroed();
-            // } else if w == WALL_DIFFUSE {
-            //     *light = Vec4::splat_expr(light.reduce_sum() / 4.0);
-            // }
+
+            if w == WALL_DIFFUSE {
+                let total_light = Vec4::<f32>::var_zeroed();
+                for i in 0..TOTAL_DIRECTIONS {
+                    *total_light += light[i];
+                }
+                *total_light /= TOTAL_DIRECTIONS as f32;
+                for i in 0..TOTAL_DIRECTIONS {
+                    *light[i] = total_light;
+                }
+            }
 
             for i in 0..TOTAL_DIRECTIONS {
                 next_lights.write(pos.extend(i), light[i]);
@@ -204,16 +220,16 @@ fn main() {
     let mut active_buttons = HashSet::new();
 
     let light_color = Vec3::new(1.0, 0.7, 0.2);
-    let light_magnitude = 15.0;
+    let light_magnitude = 15.0 / TOTAL_DIRECTIONS as f32;
     let light = Vec3::new(
         light_color.x * light_magnitude,
         light_color.y * light_magnitude,
         light_color.z * light_magnitude,
     );
 
-    let mut total_light = [Vec3::splat(0.0); TOTAL_DIRECTIONS as usize];
+    let total_light = [light; TOTAL_DIRECTIONS as usize];
 
-    total_light[4] = light;
+    // total_light[4] = light;
 
     let update_cursor = |active_buttons: &HashSet<MouseButton>,
                          cursor_pos: PhysicalPosition<f64>| {
@@ -232,6 +248,8 @@ fn main() {
         }
     };
     let update_cursor = &update_cursor;
+
+    println!("Ready");
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
