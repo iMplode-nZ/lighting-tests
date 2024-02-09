@@ -7,70 +7,37 @@ use super::*;
 pub struct Gather {
     pub offset: IVec2,
     pub direction: u32,
-    pub quantity: f32,
 }
 
-pub fn compute_simple_gathers() -> (Vec<Gather>, u32) {
-    let center_fraction = 1.0_f32.atan2(3.0) / (PI / 4.0);
-    let side_fraction = (1.0 - center_fraction) / 2.0;
-
-    (
-        vec![
-            Gather {
-                offset: IVec2::new(-1, 0),
-                direction: 0,
-                quantity: center_fraction,
-            },
-            Gather {
-                offset: IVec2::new(-1, -1),
-                direction: 0,
-                quantity: side_fraction,
-            },
-            Gather {
-                offset: IVec2::new(-1, 1),
-                direction: 0,
-                quantity: side_fraction,
-            },
-        ],
-        1,
-    )
+#[derive(Debug, Clone)]
+pub struct GatherData {
+    pub gathers: Vec<Gather>,
+    pub angles: Vec<f32>,
+    pub blurs: Vec<f32>,
+    pub transmissions: Vec<f32>,
 }
 
-pub fn compute_gathers_2() -> (Vec<Gather>, u32) {
-    (
-        vec![
-            Gather {
-                offset: IVec2::new(-1, 0),
-                direction: 0,
-                quantity: 0.5,
-            },
-            Gather {
-                offset: IVec2::new(0, -1),
-                direction: 0,
-                quantity: 0.5,
-            },
-            Gather {
-                offset: IVec2::new(-1, 0),
-                direction: 1,
-                quantity: 0.4,
-            },
-            Gather {
-                offset: IVec2::new(-1, -1),
-                direction: 1,
-                quantity: 0.3,
-            },
-            Gather {
-                offset: IVec2::new(-1, 1),
-                direction: 1,
-                quantity: 0.3,
-            },
-        ],
-        2,
-    )
+pub fn compute_index_transmissions(angle: f32, blur: f32) -> [f32; 3] {
+    let slope = angle.tan();
+    let y = slope / (1.0 + slope.abs());
+    let x = 1.0 / (1.0 + slope.abs());
+
+    let sg = y.is_sign_positive();
+    let n = x * (1.0 - 3.0 * blur) + blur;
+    let tp = y.abs() * (1.0 - 3.0 * blur) + blur;
+    let tm = blur;
+    if sg {
+        [n, tp, tm]
+    } else {
+        [n, tm, tp]
+    }
 }
 
-pub fn compute_slope_gathers_n(directions: u32) -> Vec<Gather> {
+pub fn compute_slope_gathers_n(directions: u32) -> GatherData {
     let mut gathers = vec![];
+    let mut angles = vec![];
+    let mut blurs = vec![];
+    let mut transmissions = vec![];
 
     for dir in 0..directions {
         let angle = ((dir as f32 + 0.5) / directions as f32 - 0.5) * PI / 2.0;
@@ -84,25 +51,80 @@ pub fn compute_slope_gathers_n(directions: u32) -> Vec<Gather> {
             0.0
         };
 
-        let slope = angle.tan();
-        let y = slope / (1.0 + slope.abs());
-        let x = 1.0 / (1.0 + slope.abs());
+        angles.push(angle);
+        blurs.push(blur);
+
+        let tr = compute_index_transmissions(angle, blur);
+        transmissions.extend_from_slice(&tr);
+
         gathers.push(Gather {
             offset: IVec2::new(-1, 0),
             direction: dir,
-            quantity: x * (1.0 - 3.0 * blur) + blur,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, y.signum() as i32),
+            offset: IVec2::new(0, 1),
             direction: dir,
-            quantity: y.abs() * (1.0 - 3.0 * blur) + blur,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, -y.signum() as i32),
+            offset: IVec2::new(0, -1),
             direction: dir,
-            quantity: blur,
         });
     }
 
-    gathers
+    GatherData {
+        gathers,
+        angles,
+        blurs,
+        transmissions,
+    }
+}
+/*
+Angles: [-0.69813174, -0.52359873, -0.3890658, -0.21453294, 0.0, 0.21453294, 0.3890658, 0.52359873, 0.6981317]
+Lights: [4, 4, 4, 3.8, 5, 3.8, 4, 4, 4]
+Blurs: [0.0, 0.0, 0.07, 0.12, 0.2, 0.12, 0.07, 0.0, 0.0]
+*/
+pub fn precomputed_lights() -> [f32; 9] {
+    [4.0, 4.0, 4.0, 3.8, 5.0, 3.8, 4.0, 4.0, 4.0].map(|x| x / 4.0)
+}
+pub fn precomputed_slope_gathers(directions: u32) -> GatherData {
+    assert!(directions == 9);
+    let mut gathers = vec![];
+    let angles = vec![
+        -0.69813174,
+        -0.52359873,
+        -0.3890658,
+        -0.21453294,
+        0.0,
+        0.21453294,
+        0.3890658,
+        0.52359873,
+        0.6981317,
+    ];
+    let blurs = vec![0.0, 0.0, 0.07, 0.12, 0.2, 0.12, 0.07, 0.0, 0.0];
+    let mut transmissions = vec![];
+
+    for dir in 0..directions {
+        let tr = compute_index_transmissions(angles[dir as usize], blurs[dir as usize]);
+        transmissions.extend_from_slice(&tr);
+
+        gathers.push(Gather {
+            offset: IVec2::new(-1, 0),
+            direction: dir,
+        });
+        gathers.push(Gather {
+            offset: IVec2::new(0, 1),
+            direction: dir,
+        });
+        gathers.push(Gather {
+            offset: IVec2::new(0, -1),
+            direction: dir,
+        });
+    }
+
+    GatherData {
+        gathers,
+        angles,
+        blurs,
+        transmissions,
+    }
 }
