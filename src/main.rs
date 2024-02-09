@@ -255,17 +255,10 @@ fn main() {
                     escape!({
                         for wall_face in 0..4 {
                             for (i, gather) in gathers.iter().enumerate() {
-                                // TODO: This stuff seems buggy. Fix.
                                 if rotate(wall_face, gather.offset) + offset == IVec2::ZERO {
                                     let dir = gather.direction + wall_face * DIRECTIONS;
-                                    println!(
-                                        "Adding: Direction {:?}, Face: {:?}, Gather Offset: {:?}, Transmission: {:?}",
-                                        gather.direction, wall_face, gather.offset, transmissions[i],
-                                    );
                                     track!({
                                         let lost_light = transmissions2[i as u32] * light[dir];
-                                        // IS THIS NECESSARY?
-                                        // *delta_light[dir] -= lost_light;
                                         *gathered_light += lost_light;
                                     });
                                 }
@@ -290,8 +283,8 @@ fn main() {
                                 if (angle - face_angle).cos() > EPSILON {
                                     track!({
                                         *delta_light[i + wall_face * DIRECTIONS] +=
-                                            (angle - face_angle.cos()) / normalization_factor
-                                                * gathered_light;
+                                            (angle - face_angle).cos() * gathered_light
+                                                / normalization_factor;
                                     });
                                 }
                             }
