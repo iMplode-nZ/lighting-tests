@@ -58,15 +58,15 @@ pub fn compute_slope_gathers_n(directions: u32) -> GatherData {
         transmissions.extend_from_slice(&tr);
 
         gathers.push(Gather {
-            offset: IVec2::new(-1, 0),
+            offset: -IVec2::X,
             direction: dir,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, 1),
+            offset: IVec2::Y,
             direction: dir,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, -1),
+            offset: -IVec2::Y,
             direction: dir,
         });
     }
@@ -108,15 +108,15 @@ pub fn precomputed_slope_gathers(directions: u32) -> GatherData {
         transmissions.extend_from_slice(&tr);
 
         gathers.push(Gather {
-            offset: IVec2::new(-1, 0),
+            offset: -IVec2::X,
             direction: dir,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, 1),
+            offset: IVec2::Y,
             direction: dir,
         });
         gathers.push(Gather {
-            offset: IVec2::new(0, -1),
+            offset: -IVec2::Y,
             direction: dir,
         });
     }

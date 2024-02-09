@@ -34,8 +34,15 @@ const LIGHT_STEP: f32 = 0.1;
 const TRANSMISSION_STEP: f32 = 0.01;
 
 const WALL_ABSORB: u32 = 0b01;
-const WALL_REFLECT: u32 = 0b10;
+// const WALL_REFLECT: u32 = 0b10;
+// TODO: Could actually use this for fog by allowing partial blurs.
 const WALL_BLUR: u32 = 0b100;
+const WALL_TINT: u32 = 0b1000;
+const WALL_DIFFUSE: u32 = 0b10000;
+
+const EPSILON: f32 = 0.001;
+
+// const SOLID_WALLS: u32 = WALL_DIFFUSE; // & WALL_REFLECT
 
 #[derive(Debug, Copy, Clone)]
 enum State {
@@ -112,6 +119,8 @@ fn main() {
     );
 
     let walls = device.create_tex2d::<u32>(PixelStorage::Byte1, GRID_SIZE, GRID_SIZE, 1);
+    let wall_colors =
+        device.create_tex2d::<Vec4<f32>>(PixelStorage::Float4, GRID_SIZE, GRID_SIZE, 1);
 
     let draw_kernel = Kernel::<fn(Lights)>::new(
         &device,
@@ -123,16 +132,30 @@ fn main() {
                 *color += lights.read(pos.extend(i)).xyz();
             }
 
-            // TODO: Tonemap
-
+            // let wall_alpha = 0.0.var();
+            // let wall_color = Vec3::var_zeroed();
             let w = walls.read(pos);
             if w == WALL_ABSORB {
-                *color = Vec3::new(1.0, 0.0, 0.0).expr();
+                *color = Vec3::new(0.2, 0.2, 0.2);
             } else if w == WALL_BLUR {
-                *color = Vec3::new(0.0, 1.0, 0.0).expr();
-            } else if w == WALL_REFLECT {
-                *color = Vec3::new(0.0, 0.0, 1.0).expr();
+                *color = Vec3::new(0.7, 0.7, 0.7);
+            } else if w == WALL_TINT {
+                *color = wall_colors.read(pos).xyz();
+            } else if w == WALL_DIFFUSE {
+                *color = Vec3::new(0.4, 0.4, 0.4);
             }
+            // if w == WALL_ABSORB {
+            //     *wall_color = Vec3::new(0.2, 0.2, 0.2);
+            //     *wall_
+            // } else if w == WALL_BLUR {
+            //     *wall_color = Vec3::new(0.7, 0.7, 0.7);
+            //     *wall_alpha = 0.3;
+            // } else if w == WALL_TINT {
+            //     *wall_color = wall_colors.read(pos);
+            //     *wall_alpha = 0.1;
+            // } else if w == WALL_DIFFUSE {
+            //     *color = Vec3::new(0.0, 0.0, 1.0).expr();
+            // }
 
             display.write(display_pos, color.extend(1.0));
         }),
@@ -160,33 +183,41 @@ fn main() {
             }),
         );
 
-    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32)>::new(
+    let update_wall_kernel = Kernel::<fn(Vec2<u32>, u32, Vec3<f32>)>::new(
         &device,
-        &track!(|pos, wall| {
+        &track!(|pos, wall, color| {
             walls.write(pos, wall);
+            wall_colors.write(pos, color.extend(1.0));
         }),
     );
 
+    fn rotate(face: u32, dir: IVec2) -> IVec2 {
+        match face {
+            // +x
+            0 => dir,
+            // -y
+            1 => IVec2::new(dir.y, -dir.x),
+            // -x
+            2 => -dir,
+            // y
+            3 => IVec2::new(-dir.y, dir.x),
+            _ => panic!("Invalid"),
+        }
+    }
+
     let update_kernel = Kernel::<fn(Lights, Lights, [f32; 3 * DIRECTIONS as usize])>::new(
         &device,
-        &track!(|lights, next_lights, transmissions| {
+        &track!(|lights, next_lights, transmissions2| {
             let pos = dispatch_id().xy() + 1;
 
             let light = [Vec4::<f32>::splat(0.0); TOTAL_DIRECTIONS as usize].var();
 
-            fn rotate(face: u32, dir: IVec2) -> IVec2 {
-                // TODO: Make sure these are right; it doesn't really matter though.
-                match face {
-                    // +x
-                    0 => dir,
-                    // -y
-                    1 => IVec2::new(dir.y, -dir.x),
-                    // -x
-                    2 => -dir,
-                    // y
-                    3 => IVec2::new(-dir.y, dir.x),
-                    _ => panic!("Invalid"),
+            let w = walls.read(pos);
+            if w == WALL_ABSORB || w == WALL_DIFFUSE {
+                for i in 0..TOTAL_DIRECTIONS {
+                    next_lights.write(pos.extend(i), Vec4::splat(0.0));
                 }
+                return;
             }
 
             let apply = |face: u32| {
@@ -194,14 +225,14 @@ fn main() {
                     for (i, gather) in gathers.iter().enumerate() {
                         track!({
                             let dir = gather.direction + face * DIRECTIONS;
-                            let transmission = transmissions[i as u32]
+                            let transmission = transmissions2[i as u32]
                                 * lights.read(
                                     (pos.cast_i32()
                                         + Vec2::<i32>::from(rotate(face, gather.offset)))
                                     .cast_u32()
                                     .extend(dir),
                                 );
-                            light.write(dir, transmission + light[dir]);
+                            *light[dir] += transmission;
                         })
                     }
                 })
@@ -212,24 +243,81 @@ fn main() {
             apply(2);
             apply(3);
 
-            let w = walls.read(pos);
-            if w == WALL_ABSORB {
-                *light = [Vec4::splat(0.0); TOTAL_DIRECTIONS as usize];
-            }
+            let delta_light = [Vec4::<f32>::splat(0.0); TOTAL_DIRECTIONS as usize].var();
 
-            if w == WALL_BLUR {
-                let total_light = Vec4::<f32>::var_zeroed();
-                for i in 0..TOTAL_DIRECTIONS {
-                    *total_light += light[i];
+            let try_wall = |face: u32| {
+                let offset = rotate(face, IVec2::X);
+                let wpos = (pos.cast_i32() + Vec2::<i32>::from(offset)).cast_u32();
+                // TODO: Add reflect.
+                if walls.read(wpos) == WALL_DIFFUSE {
+                    let wall_color = wall_colors.read(wpos);
+                    let gathered_light = Vec4::<f32>::var_zeroed();
+                    escape!({
+                        for wall_face in 0..4 {
+                            for (i, gather) in gathers.iter().enumerate() {
+                                // TODO: This stuff seems buggy. Fix.
+                                if rotate(wall_face, gather.offset) + offset == IVec2::ZERO {
+                                    let dir = gather.direction + wall_face * DIRECTIONS;
+                                    println!(
+                                        "Adding: Direction {:?}, Face: {:?}, Gather Offset: {:?}, Transmission: {:?}",
+                                        gather.direction, wall_face, gather.offset, transmissions[i],
+                                    );
+                                    track!({
+                                        let lost_light = transmissions2[i as u32] * light[dir];
+                                        // IS THIS NECESSARY?
+                                        // *delta_light[dir] -= lost_light;
+                                        *gathered_light += lost_light;
+                                    });
+                                }
+                            }
+                        }
+                    });
+                    *gathered_light *= wall_color;
+                    escape!({
+                        let mut normalization_factor = 0.0;
+                        let face_angle = PI + (PI / 2.0 * face as f32);
+                        for wall_face in 0..4 {
+                            for i in 0..DIRECTIONS {
+                                let angle = angles[i as usize] + wall_face as f32 * PI / 2.0;
+                                if (angle - face_angle).cos() > EPSILON {
+                                    normalization_factor += (angle - face_angle).cos();
+                                }
+                            }
+                        }
+                        for wall_face in 0..4 {
+                            for i in 0..DIRECTIONS {
+                                let angle = angles[i as usize] + wall_face as f32 * PI / 2.0;
+                                if (angle - face_angle).cos() > EPSILON {
+                                    track!({
+                                        *delta_light[i + wall_face * DIRECTIONS] +=
+                                            (angle - face_angle.cos()) / normalization_factor
+                                                * gathered_light;
+                                    });
+                                }
+                            }
+                        }
+                    });
                 }
-                *total_light /= TOTAL_DIRECTIONS as f32;
-                for i in 0..TOTAL_DIRECTIONS {
-                    *light[i] = total_light;
-                }
-            }
+            };
+            try_wall(0);
+            try_wall(1);
+            try_wall(2);
+            try_wall(3);
+
+            // TODO: Adjust for non-equal light directions.
+            // if w == WALL_BLUR {
+            //     let total_light = Vec4::<f32>::var_zeroed();
+            //     for i in 0..TOTAL_DIRECTIONS {
+            //         *total_light += light[i];
+            //     }
+            //     *total_light /= TOTAL_DIRECTIONS as f32;
+            //     for i in 0..TOTAL_DIRECTIONS {
+            //         *light[i] = total_light;
+            //     }
+            // }
 
             for i in 0..TOTAL_DIRECTIONS {
-                next_lights.write(pos.extend(i), light[i]);
+                next_lights.write(pos.extend(i), light[i] + delta_light[i]);
             }
         }),
     );
@@ -279,10 +367,10 @@ fn main() {
             true
         } else {
             if active_buttons.contains(&MouseButton::Right) {
-                update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB);
+                update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_ABSORB, &Vec3::splat(0.0));
             }
             if active_buttons.contains(&MouseButton::Middle) {
-                update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_BLUR);
+                update_wall_kernel.dispatch([1, 1, 1], &pos, &WALL_DIFFUSE, &Vec3::splat(1.0));
             }
             false
         }
@@ -330,7 +418,7 @@ fn main() {
 
         println!();
 
-        let dir = (*activated_light as usize) % DIRECTIONS as usize;
+        let dir = (*activated_light % DIRECTIONS) as usize;
 
         let mut num = None;
 
@@ -376,7 +464,7 @@ fn main() {
                     }
                     KeyCode::ArrowDown => {
                         *activated_light =
-                            (*activated_light - 1 + TOTAL_DIRECTIONS) % TOTAL_DIRECTIONS;
+                            (*activated_light + TOTAL_DIRECTIONS - 1) % TOTAL_DIRECTIONS;
                     }
                     KeyCode::KeyA => {
                         state = State::UpdatingAngle;
@@ -467,6 +555,7 @@ fn main() {
             let tr = compute_index_transmissions(angles[dir], blurs[dir]);
             transmissions[dir * 3..dir * 3 + 3].copy_from_slice(&tr);
         }
+        let dir = (*activated_light % DIRECTIONS) as usize;
         match state {
             State::Normal => {
                 println!("Direction: {:?}", dir);
