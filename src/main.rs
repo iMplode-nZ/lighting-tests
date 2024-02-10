@@ -140,8 +140,6 @@ fn main() {
             let w = walls.read(pos);
             if w == WALL_ABSORB {
                 *color = Vec3::new(0.2, 0.2, 0.2);
-            } else if w == WALL_BLUR {
-                *color = Vec3::new(0.7, 0.7, 0.7);
             } else if w == WALL_DIFFUSE {
                 *color = Vec3::splat(0.1) + color;
             }
@@ -341,7 +339,18 @@ fn main() {
             ); TOTAL_DIRECTIONS as usize];
             update_emission_kernel.dispatch([1, 1, TOTAL_DIRECTIONS], &pos, &total_light);
         } else if active_buttons.contains(&MouseButton::Left) {
-            update_wall_kernel.dispatch([4, 4, 1], &pos, &writer.wall(), &Vec3::splat(0.9));
+            let w = writer.wall();
+
+            update_wall_kernel.dispatch(
+                [1, 1, 1],
+                &pos,
+                &writer.wall(),
+                &if w == 0 {
+                    Vec3::splat(1.0)
+                } else {
+                    Vec3::splat(0.9)
+                },
+            );
         }
     };
     let update_cursor = &mut update_cursor;
@@ -379,7 +388,7 @@ fn main() {
                         *emission += LIGHT_STEP;
                     }
                     KeyCode::ArrowDown => {
-                        *emission += LIGHT_STEP;
+                        *emission -= LIGHT_STEP;
                     }
                     KeyCode::Escape => state = State::Normal,
                     _ => (),
