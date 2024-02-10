@@ -33,6 +33,7 @@ pub fn compute_index_transmissions(angle: f32, blur: f32) -> [f32; 3] {
     }
 }
 
+#[allow(dead_code)]
 pub fn compute_slope_gathers_n(directions: u32) -> GatherData {
     let mut gathers = vec![];
     let mut angles = vec![];
@@ -83,11 +84,11 @@ Angles: [-0.69813174, -0.52359873, -0.3890658, -0.21453294, 0.0, 0.21453294, 0.3
 Lights: [4, 4, 4, 3.8, 5, 3.8, 4, 4, 4]
 Blurs: [0.0, 0.0, 0.07, 0.12, 0.2, 0.12, 0.07, 0.0, 0.0]
 */
-pub fn precomputed_lights() -> [f32; 9] {
-    [4.0, 4.0, 4.0, 3.8, 5.0, 3.8, 4.0, 4.0, 4.0].map(|x| x / 4.0)
+pub const fn precomputed_lights() -> [f32; 9] {
+    [1.0, 1.0, 1.0, 0.95, 1.25, 0.95, 1.0, 1.0, 1.0]
 }
-pub fn precomputed_slope_gathers(directions: u32) -> GatherData {
-    assert!(directions == 9);
+pub fn precomputed_slope_gathers() -> GatherData {
+    let directions = 9;
     let mut gathers = vec![];
     let angles = vec![
         -0.69813174,
